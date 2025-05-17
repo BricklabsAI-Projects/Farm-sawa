@@ -1,0 +1,267 @@
+const twilioClient = require('../utils/twilioClient');
+const userService = require('../services/userService');
+const termsAndConditions = require('../utils/termsConditions');
+const db = require('../db');
+const nlpService = require('../services/nlpService');
+const weatherAPI = require('../integrations/weatherAPI');
+const marketPriceAPI = require('../integrations/marketPriceAPI');
+const cropManagementAPI = require('../integrations/cropManagementAPI');
+const fileProcessingService = require('../services/fileProcessingService');
+const deepLeafAPI = require('../integrations/deepLeafAPI');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+
+exports.receiveMessage = async (req, res) => {
+    try {
+        const message = req.body;
+        console.log("Received message:", message); // Log the entire message object
+
+        const phoneNumber = message.WaId;
+        const body = message.Body.toLowerCase();
+
+        console.log('WaId:', phoneNumber);
+
+        if (!phoneNumber || !body) {
+            return res.status(400).send({ error: 'Invalid message structure' });
+        }
+
+        // Check if the user already exists
+        let user = await userService.getUser(phoneNumber);
+
+        if (!user) {
+            // New user onboarding
+            console.log('New user detected. Onboarding user:', phoneNumber);
+
+            // Save the new user to the database
+            await userService.registerUser(phoneNumber);
+
+            // Send onboarding message
+            const onboardingMessage = `
+                Welcome to FarmSawa! 🌱
+
+                We are your virtual assistant for all farming-related queries. Here’s what we can help you with:
+                - Weather updates
+                - Market prices
+                - Disease detection
+                - Crop management advice
+
+                By continuing to use our services, you agree to our terms and conditions. For more details, visit: ${termsAndConditions.url}
+
+                How can we assist you today? 😊
+            `;
+
+            await twilioClient.messages.create({
+                from: process.env.TWILIO_PHONE_NUMBER,
+                to: `whatsapp:${phoneNumber}`,
+                body: onboardingMessage,
+            });
+
+            return res.status(200).send({ message: 'User onboarded successfully.' });
+        }
+
+        // Extract userId from the user object
+        const userId = user.id;
+        // Save the user's message in the database
+        const userMessageQuery = `
+            INSERT INTO messages (user_id, content, sender)
+            VALUES ($1, $2, 'user')
+            RETURNING id, content, sender, created_at;
+        `;
+        const userMessageValues = [userId, body];
+        const userMessageResult = await db.query(userMessageQuery, userMessageValues);
+
+        if (!userMessageResult.rows || userMessageResult.rows.length === 0) {
+            throw new Error('Failed to save user message.');
+        }
+
+        // Process the message using NLP
+        const nlpResponse = await nlpService.getNlpResponse(body); // Use 'body' instead of 'content'
+        const { intent, parameters } = nlpResponse;
+
+        // Log NLP output
+        console.log(`NLP Output: Intent - ${intent}, Parameters - ${JSON.stringify(parameters)}`);
+
+        let systemResponse;
+
+        if (intent === 'weather') {
+            const { location, time } = parameters;
+            if (!location || !time) {
+                systemResponse = 'Please provide both the location and time for the weather update.';
+            } else {
+                systemResponse = await weatherAPI.getWeather(location, time);
+            }
+        } else if (intent === 'market_prices') {
+            const { product, location } = parameters;
+            if (!product || !location) {
+                systemResponse = 'Please provide both the product and location for the market price query.';
+            } else {
+                try {
+                    systemResponse = await marketPriceAPI.getMarketPrices(product, location);
+                } catch (error) {
+                    systemResponse = error.message;
+                }
+            }
+        } else if (intent === 'disease_detection') {
+            let imageFilePath; // Define imageFilePath in the outer scope
+            try {
+                // Step 1: Detect the disease using deepLeafAPI
+                const mediaUrl = message.MediaUrl0;
+
+                if (!mediaUrl) {
+                    systemResponse = 'No image was found. Please send a clear photo of the affected crop.';
+                } else {
+                    // Step 2: Download the image from Twilio Media URL
+                    imageFilePath = path.join(__dirname, '../temp', 'uploaded-image.jpg');
+                    const response = await axios({
+                        url: mediaUrl,
+                        method: 'GET',
+                        responseType: 'stream',
+                        auth: {
+                            username: process.env.TWILIO_ACCOUNT_SID, // Twilio AccountSid
+                            password: process.env.TWILIO_AUTH_TOKEN, // Twilio AuthToken
+                        },
+                    });
+
+                    const writer = fs.createWriteStream(imageFilePath);
+                    response.data.pipe(writer);
+                    await new Promise((resolve, reject) => {
+                        writer.on('finish', resolve);
+                        writer.on('error', reject);
+                    });
+
+                    console.log('Image downloaded successfully to:', imageFilePath);
+
+                    // Step 3: Analyze the image using DeepLeaf API
+                    const detectionResult = await deepLeafAPI.analyzeCropDisease(imageFilePath);
+
+                    if (detectionResult && detectionResult.disease) {
+                        const detectedDisease = detectionResult.disease;
+
+                        // Step 4: Query the database for treatment methods
+                        const treatmentQuery = `
+                            SELECT category_name, scientific_name, variety, chemical_product, company, active_ingredient, rate, information
+                            FROM treatments
+                            WHERE category_name = $1;
+                        `;
+                        const treatmentValues = [detectedDisease];
+                        const treatmentResult = await db.query(treatmentQuery, treatmentValues);
+
+                        if (treatmentResult.rows && treatmentResult.rows.length > 0) {
+                            const treatment = treatmentResult.rows[0];
+
+                            // Step 5: Query the database for suppliers of the active ingredient
+                            const supplierQuery = `
+                                SELECT supplier_name, product_name, price
+                                FROM suppliers
+                                WHERE active_ingredient = $1;
+                            `;
+                            const supplierValues = [treatment.active_ingredient];
+                            const supplierResult = await db.query(supplierQuery, supplierValues);
+
+                            if (supplierResult.rows && supplierResult.rows.length > 0) {
+                                const suppliers = supplierResult.rows;
+
+                                // Step 6: Construct the response with disease, treatment, and supplier data
+                                systemResponse = `
+                                    Disease Detected: ${detectedDisease}
+                                    Scientific Name: ${treatment.scientific_name}
+                                    Treatment: ${treatment.chemical_product} by ${treatment.company}
+                                    Active Ingredient: ${treatment.active_ingredient}
+                                    Application Rate: ${treatment.rate}
+                                    Mode of Action: ${treatment.information}
+
+                                    Suppliers:
+                                    ${suppliers.map(supplier => `
+                                        - ${supplier.supplier_name}: ${supplier.product_name} at ${supplier.price}
+                                `).join('\n')}
+                            `;
+                            } else {
+                                // No suppliers found, return only disease and treatment data
+                                systemResponse = `
+                                    Disease Detected: ${detectedDisease}
+                                    Scientific Name: ${treatment.scientific_name}
+                                    Treatment: ${treatment.chemical_product} by ${treatment.company}
+                                    Active Ingredient: ${treatment.active_ingredient}
+                                    Application Rate: ${treatment.rate}
+                                    Mode of Action: ${treatment.information}
+
+                                    No suppliers found for the active ingredient.
+                                `;
+                            }
+                        } else {
+                            // No treatment data found, return only the detected disease
+                            systemResponse = `Disease Detected: ${detectedDisease}. No treatment information available in the database.`;
+                        }
+                    } else {
+                        // No disease detected
+                        systemResponse = 'No disease was detected in the uploaded image. Please ensure the image is clear and try again.';
+                    }
+                }
+            } catch (error) {
+                console.error('Error in disease detection:', error.message);
+                systemResponse = 'Failed to analyze the crop image for diseases. Please try again later.';
+            } finally {
+                // Clean up the temporary file
+                if (imageFilePath && fs.existsSync(imageFilePath)) {
+                    fs.unlinkSync(imageFilePath);
+                }
+            }
+        } else if (intent === 'salutations') {
+            systemResponse = 'Hello! I am FarmSawa, your virtual assistant for all farming-related queries. How can I assist you today?Do you want to know the weather, detect a disease or know market prices?';
+        } else if (intent === 'crop_management') {
+            const { crop_name: cropName } = parameters;
+            if (!cropName) {
+                systemResponse = 'Please specify the crop you want advice on.';
+            } else {
+                try {
+                    // Fetch crop management tips from cropManagementAPI
+                    systemResponse = await cropManagementAPI.getCropManagementTips(cropName);
+                } catch (error) {
+                    console.error('Error handling crop management query:', error.message);
+                    systemResponse = 'Failed to process your crop management query.';
+                }
+            }
+
+        } else {
+            // Handle unknown intents
+            systemResponse = `I couldn't understand your request. Here are the services I can assist with:
+            - Weather updates
+            - Market prices
+            - Disease detection
+            - Crop management advice
+
+            Please try rephrasing your question or specifying the service you need.`;
+        }
+
+        console.log(`System Response: ${systemResponse}`);
+
+        // Save the system's response in the database
+        const systemMessageQuery = `
+            INSERT INTO messages (user_id, content, sender)
+            VALUES ($1, $2, 'system')
+            RETURNING id, content, sender, created_at;
+        `;
+        const systemMessageValues = [userId, systemResponse];
+        const systemMessageResult = await db.query(systemMessageQuery, systemMessageValues);
+
+        if (!systemMessageResult.rows || systemMessageResult.rows.length === 0) {
+            throw new Error('Failed to save system message.');
+        }
+
+        // Send the system response back to the user via WhatsApp
+        await twilioClient.messages.create({
+            from: process.env.TWILIO_PHONE_NUMBER,
+            to: `whatsapp:${phoneNumber}`,
+            body: systemResponse,
+        });
+
+        res.status(200).json({
+            userMessage: userMessageResult.rows[0],
+            systemMessage: systemMessageResult.rows[0],
+        });
+    } catch (error) {
+        console.error('Error handling message:', error.message);
+        res.status(500).json({ error: 'Failed to handle message', details: error.message });
+    }
+};
