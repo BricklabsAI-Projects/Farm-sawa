@@ -17,8 +17,9 @@ module.exports = {
                             - weather: Provide weather updates (requires location and time).
                             - market_prices: Provide market prices for crops (requires product and location).
                             - disease_detection: Detect crop diseases (requires an image).
-                            - product_suppliers: Provide supplier information for products (requires product and location).
-                            - crop_management: Provide crop management advice (requires crop name)Includes the best practices and location as well as wether and place to plant a particular crop.
+                            - disease_treatment: Provide treatment methods for a known disease (requires disease name).
+                            - product_suppliers: Provide supplier information for products (requires product name and location). Mark all supplier results as paid ads.
+                            - crop_management: Provide crop management advice (requires crop name). Includes best practices, location, and weather for planting.
                             If the user input is unrelated to these intents, respond with "Intent: unknown". Extract the intent and parameters from the user input in the format:
                             Intent: <intent>
                             Parameters: { "parameter1": "value1", "parameter2": "value2" }`,

@@ -223,6 +223,75 @@ exports.receiveMessage = async (req, res) => {
                 }
             }
 
+        } else if (intent === 'disease_treatment') {
+            const { disease_name: diseaseName } = parameters;
+            if (!diseaseName) {
+                systemResponse = 'Please specify the disease you want treatment information for.';
+            } else {
+                try {
+                    const treatmentQuery = `
+                        SELECT category_name, scientific_name, variety, chemical_product, company, active_ingredient, rate, information
+                        FROM treatments
+                        WHERE LOWER(category_name) LIKE LOWER($1) OR LOWER(scientific_name) LIKE LOWER($1);
+                    `;
+                    const treatmentValues = [`%${diseaseName}%`];
+                    const treatmentResult = await db.query(treatmentQuery, treatmentValues);
+
+                    if (treatmentResult.rows && treatmentResult.rows.length > 0) {
+                        const treatment = treatmentResult.rows[0];
+
+                        // Construct the treatment information
+                        let treatmentInfo = `
+                            Disease: ${treatment.category_name}
+                            Scientific Name: ${treatment.scientific_name}
+                            Variety: ${treatment.variety}
+                            Treatment: ${treatment.chemical_product} by ${treatment.company}
+                            Active Ingredient: ${treatment.active_ingredient}
+                            Application Rate: ${treatment.rate}
+                            Mode of Action: ${treatment.information}
+                        `;
+
+                        // Pass the treatment information through NLP for summarization
+                        const nlpResponse = await nlpService.processText(treatmentInfo);
+                        systemResponse = `Here is the treatment information for "${diseaseName}":\n\n${nlpResponse}`;
+                    } else {
+                        systemResponse = `No treatment information found for the disease: ${diseaseName}.`;
+                    }
+                } catch (error) {
+                    console.error('Error fetching treatment information:', error.message);
+                    systemResponse = 'Failed to retrieve treatment information. Please try again later.';
+                }
+            }
+        } else if (intent === 'product_suppliers') {
+            const { product_name: productName, location } = parameters;
+            if (!productName || !location) {
+                systemResponse = 'Please provide both the product name and location to find suppliers.';
+            } else {
+                try {
+                    const supplierQuery = `
+                        SELECT supplier_name, product_name, price
+                        FROM suppliers
+                        WHERE product_name = $1 AND location = $2;
+                    `;
+                    const supplierValues = [productName, location];
+                    const supplierResult = await db.query(supplierQuery, supplierValues);
+
+                    if (supplierResult.rows && supplierResult.rows.length > 0) {
+                        const suppliers = supplierResult.rows;
+                        systemResponse = `
+                            Suppliers for ${productName} in ${location} (Paid Ads):
+                            ${suppliers.map(supplier => `
+                                - ${supplier.supplier_name}: ${supplier.product_name} at ${supplier.price}
+                            `).join('\n')}
+                        `;
+                    } else {
+                        systemResponse = `No suppliers found for ${productName} in ${location}.`;
+                    }
+                } catch (error) {
+                    console.error('Error fetching supplier information:', error.message);
+                    systemResponse = 'Failed to retrieve supplier information. Please try again later.';
+                }
+            }
         } else {
             // Handle unknown intents
             systemResponse = `I couldn't understand your request. Here are the services I can assist with:
