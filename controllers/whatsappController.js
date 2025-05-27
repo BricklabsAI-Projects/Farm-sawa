@@ -11,6 +11,7 @@ const deepLeafAPI = require('../integrations/deepLeafAPI');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const diseaseService = require('../services/diseaseService'); // Import the diseaseService
 
 exports.receiveMessage = async (req, res) => {
     try {
@@ -20,7 +21,7 @@ exports.receiveMessage = async (req, res) => {
         const phoneNumber = message.WaId;
         const body = message.Body.toLowerCase();
 
-        console.log('WaId:', phoneNumber);
+        // console.log('WaId:', phoneNumber);
 
         if (!phoneNumber || !body) {
             return res.status(400).send({ error: 'Invalid message structure' });
@@ -103,109 +104,25 @@ exports.receiveMessage = async (req, res) => {
                 }
             }
         } else if (intent === 'disease_detection') {
-            let imageFilePath; // Define imageFilePath in the outer scope
             try {
-                // Step 1: Detect the disease using deepLeafAPI
                 const mediaUrl = message.MediaUrl0;
 
                 if (!mediaUrl) {
                     systemResponse = 'No image was found. Please send a clear photo of the affected crop.';
                 } else {
-                    // Step 2: Download the image from Twilio Media URL
-                    imageFilePath = path.join(__dirname, '../temp', 'uploaded-image.jpg');
-                    const response = await axios({
-                        url: mediaUrl,
-                        method: 'GET',
-                        responseType: 'stream',
-                        auth: {
-                            username: process.env.TWILIO_ACCOUNT_SID, // Twilio AccountSid
-                            password: process.env.TWILIO_AUTH_TOKEN, // Twilio AuthToken
-                        },
-                    });
+                    // Call diseaseService to detect disease and get summarized chunks
+                    const messageChunks = await diseaseService.detectDisease(mediaUrl);
 
-                    const writer = fs.createWriteStream(imageFilePath);
-                    response.data.pipe(writer);
-                    await new Promise((resolve, reject) => {
-                        writer.on('finish', resolve);
-                        writer.on('error', reject);
-                    });
-
-                    console.log('Image downloaded successfully to:', imageFilePath);
-
-                    // Step 3: Analyze the image using DeepLeaf API
-                    const detectionResult = await deepLeafAPI.analyzeCropDisease(imageFilePath);
-
-                    if (detectionResult && detectionResult.disease) {
-                        const detectedDisease = detectionResult.disease;
-
-                        // Step 4: Query the database for treatment methods
-                        const treatmentQuery = `
-                            SELECT category_name, scientific_name, variety, chemical_product, company, active_ingredient, rate, information
-                            FROM treatments
-                            WHERE category_name = $1;
-                        `;
-                        const treatmentValues = [detectedDisease];
-                        const treatmentResult = await db.query(treatmentQuery, treatmentValues);
-
-                        if (treatmentResult.rows && treatmentResult.rows.length > 0) {
-                            const treatment = treatmentResult.rows[0];
-
-                            // Step 5: Query the database for suppliers of the active ingredient
-                            const supplierQuery = `
-                                SELECT supplier_name, product_name, price
-                                FROM suppliers
-                                WHERE active_ingredient = $1;
-                            `;
-                            const supplierValues = [treatment.active_ingredient];
-                            const supplierResult = await db.query(supplierQuery, supplierValues);
-
-                            if (supplierResult.rows && supplierResult.rows.length > 0) {
-                                const suppliers = supplierResult.rows;
-
-                                // Step 6: Construct the response with disease, treatment, and supplier data
-                                systemResponse = `
-                                    Disease Detected: ${detectedDisease}
-                                    Scientific Name: ${treatment.scientific_name}
-                                    Treatment: ${treatment.chemical_product} by ${treatment.company}
-                                    Active Ingredient: ${treatment.active_ingredient}
-                                    Application Rate: ${treatment.rate}
-                                    Mode of Action: ${treatment.information}
-
-                                    Suppliers:
-                                    ${suppliers.map(supplier => `
-                                        - ${supplier.supplier_name}: ${supplier.product_name} at ${supplier.price}
-                                `).join('\n')}
-                            `;
-                            } else {
-                                // No suppliers found, return only disease and treatment data
-                                systemResponse = `
-                                    Disease Detected: ${detectedDisease}
-                                    Scientific Name: ${treatment.scientific_name}
-                                    Treatment: ${treatment.chemical_product} by ${treatment.company}
-                                    Active Ingredient: ${treatment.active_ingredient}
-                                    Application Rate: ${treatment.rate}
-                                    Mode of Action: ${treatment.information}
-
-                                    No suppliers found for the active ingredient.
-                                `;
-                            }
-                        } else {
-                            // No treatment data found, return only the detected disease
-                            systemResponse = `Disease Detected: ${detectedDisease}. No treatment information available in the database.`;
-                        }
+                    if (messageChunks && messageChunks.length > 0) {
+                        // Combine all chunks into a single response for now
+                        systemResponse = messageChunks.join('\n\n');
                     } else {
-                        // No disease detected
-                        systemResponse = 'No disease was detected in the uploaded image. Please ensure the image is clear and try again.';
+                        systemResponse = 'No response received from the DeepLeaf API. Please try again later.';
                     }
                 }
             } catch (error) {
                 console.error('Error in disease detection:', error.message);
                 systemResponse = 'Failed to analyze the crop image for diseases. Please try again later.';
-            } finally {
-                // Clean up the temporary file
-                if (imageFilePath && fs.existsSync(imageFilePath)) {
-                    fs.unlinkSync(imageFilePath);
-                }
             }
         } else if (intent === 'salutations') {
             systemResponse = 'Hello! I am FarmSawa, your virtual assistant for all farming-related queries. How can I assist you today?Do you want to know the weather, detect a disease or know market prices?';

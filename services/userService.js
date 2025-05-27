@@ -42,7 +42,7 @@ const registerUser = async (phoneNumber, password) => {
 const getUser = async (phoneNumber) => {
     try {
         const result = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phoneNumber]);
-        console.log('Get user result:', result);
+      //  console.log('Get user result:', result);
         return result.rows[0];
     } catch (error) {
         console.error('Error in getUser:', error);

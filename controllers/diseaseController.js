@@ -11,6 +11,7 @@ exports.detectDisease = async (req, res) => {
         const diseaseInfo = await diseaseService.detectDisease(image);
         res.status(200).send(diseaseInfo);
     } catch (error) {
-        res.status(500).send({ error: 'An error occurred while detecting the disease' });
+        console.error('Error in disease detection:', error.message);
+        res.status(500).send({ error: 'An error occurred while detecting the disease', details: error.message });
     }
 };
